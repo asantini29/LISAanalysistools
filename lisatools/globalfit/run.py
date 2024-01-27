@@ -267,6 +267,7 @@ class MPIControlGlobalFit:
 
         self.all_non_gmm_ranks = []
         for tmp in [
+            self.head_rank,
             self.gb_pe_rank,
             self.gb_search_rank,
             self.mbh_rank,
@@ -404,7 +405,7 @@ class MPIControlGlobalFit:
                     self.update_refit(i, gmm_info)
                 
                     # received and both cleared out (but avoid for just sample refit)
-                    if np.any(np.asarray(self.updated_search_gmm_info) == None) and "sample_refit" not in gmm_info or ("sample_refit" in gmm_info["sample_refit"] and gmm_info["sample_refit"] is None):
+                    if np.any(np.asarray(self.updated_search_gmm_info) == None) and "sample_refit" not in gmm_info or ("sample_refit" in gmm_info and gmm_info["sample_refit"] is None):
                         update_refit = False
 
                 if "send" in refit_dict and refit_dict["send"] and np.all(np.asarray(self.updated_search_gmm_info) == None):
@@ -442,6 +443,9 @@ class MPIControlGlobalFit:
                     # self.comm.send(True, dest=self.gb_search_rank, tag=1010)
                     # self.comm.send(self.current_info, dest=self.gb_search_rank, tag=2929)
                 self.have_started_refit = True
+            
+            if "no_binaries" in gb_req and gb_req["no_binaries"]:
+                update_refit = True
 
             if "finish_run" in gb_req and gb_req["finish_run"]:
                 runs_going.remove("gbs_pe")
@@ -507,7 +511,6 @@ class MPIControlGlobalFit:
 
     def run_global_fit(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
         if self.rank == self.head_rank:
-
             # send to refit 
             print("sending data")
 
@@ -535,7 +538,6 @@ class MPIControlGlobalFit:
                 time.sleep(1)
 
                 # print("checking again", update_refit)
-                
                 if update_refit:
                     update_refit = self.refit_check(runs_going, update_refit)
 

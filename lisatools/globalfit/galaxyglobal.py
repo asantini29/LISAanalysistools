@@ -477,7 +477,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
         waiting = True
         while waiting:
             time.sleep(20.0)
-            comm.send({"send": True}, dest=head_rank, tag=50)
+            comm.send({"send": True, "no_binaries": True}, dest=head_rank, tag=50)
             new_info = comm.recv(source=head_rank, tag=51)
             # print("CHECKING:", new_info.gb_info["search_gmm_info"])
             if new_info.gb_info["search_gmm_info"] is not None:
@@ -1439,13 +1439,18 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remain
                 gmm_mcmc_search_info = run_iterative_subtraction_mcmc(incoming_data, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, lisasens, comm, comm_info)
                 send_out_dict = {"search": gmm_mcmc_search_info}
 
+            print("AFTER SEARCH", comm.Get_rank())
             comm.send({"receive": True}, dest=head_rank, tag=20)
             comm.send(send_out_dict, dest=head_rank, tag=29)
-
+            print("SENT AFTER SEARCH", comm.Get_rank())
             if not hasattr(stopping_function_here, "comm") and hasattr(stopping_function_here, "add_comm"):
                 stopping_function_here.add_comm(comm)
+
+            print("load comm if needed AFTER SEARCH", comm.Get_rank())
             
             stop = stopping_function_here(incoming_data)
+            print("after stop function AFTER SEARCH", comm.Get_rank())
+            
             run_counter += 1
             if stop:
                 break
