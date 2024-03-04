@@ -664,7 +664,8 @@ class ParallelMBHSearchControl:
                 
                     prune_remove.append(j)
 
-        prune_keep = np.delete(np.arange(data_channels_AET.shape[0]), np.unique(prune_remove))
+        print(prune_remove, np.unique(prune_remove).astype(int))
+        prune_keep = np.delete(np.arange(data_channels_AET.shape[0]), np.unique(prune_remove).astype(int))
 
         output_points_pruned = np.asarray([self.output_points_info["output_points"][i] for i in prune_keep])
         best_points_pruned = np.asarray([self.output_points_info["best_points"][i] for i in prune_keep])

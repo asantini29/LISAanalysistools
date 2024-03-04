@@ -120,7 +120,8 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
     
         _ = gb.swap_likelihood_difference(bins_fin_base_in[start_ind:end_ind],bins_fin_test_in[start_ind:end_ind],fake_data_swap,psd_in_swap,start_freq_ind=0,data_length=len(fake_data[0]),data_splits=[np.array([0])],**waveform_kwargs,)
 
-        ll_diff[start_ind:end_ind] = (-1/2 * (gb.add_add + gb.remove_remove - 2 * gb.add_remove).real).get()
+        # ll_diff[start_ind:end_ind] = (-1/2 * (gb.add_add + gb.remove_remove - 2 * gb.add_remove).real).get()
+        ll_diff[start_ind:end_ind] = (gb.add_remove.real / np.sqrt(gb.add_add * gb.remove_remove)).get()
         print(start_ind, len(inds_split) - 1)
 
     keep_groups = []
@@ -137,7 +138,7 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
         if len(keep_inds) == 0:
             continue
         ll_diff_i = ll_diff[keep_inds]
-        group_test = (ll_diff_i > -25.0)  # .get()
+        group_test = (ll_diff_i > 0.5)  # .get()
         num_grouping = group_test.sum()
         
         in_here = keep_going_in[i]
@@ -156,7 +157,7 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
             sample_map = np.delete(sample_map, ind_fix)
             binary_map = np.delete(binary_map, ind_fix)
 
-        if (num_grouping + 1) > 0.5 * gb_samples.shape[0]:
+        if (num_grouping + 1) > 2:
             # remove them from possible future grouping
             gb_inds_left[sample_map, binary_map] = False
         

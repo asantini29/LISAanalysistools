@@ -150,8 +150,7 @@ class FullPESegment(GlobalFitSegment):
         other_ranks = [
             self.mpi_controller.psd_rank,
             self.mpi_controller.mbh_rank,
-            self.mpi_controller.gb_search_rank
-        ]
+        ] + self.mpi_controller.gb_search_rank
 
         # had to go after initialization of mpi because it needs the ranks
         stop_fn = GBBandLogLConvergeStopping(self.current_info.general_info["fd"], self.current_info.gb_info["band_edges"], **self.current_info.gb_info["pe_info"]["stop_kwargs"])

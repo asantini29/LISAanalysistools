@@ -698,6 +698,27 @@ class MultiGPUDataHolder:
         )
         return inner_out
 
+    def get(self):
+        """Must be the same size at current data
+        
+        
+        """
+        out = {}
+        for chan in range(2):
+            for key in [
+                "psd",
+                "lisasens",
+                "base_data",
+                "data",
+            ]: 
+                key_2 = f"channel{chan + 1}_{key}"
+                out[key_2] = []
+                for gpu_i, (gpu, gpu_split_tmp) in enumerate(zip(self.gpus, self.gpu_splits)):
+                    out[key_2].append(getattr(self, key_2)[gpu_i].get().copy().reshape(-1, self.data_length))
+
+        return out
+
+
 
 
 

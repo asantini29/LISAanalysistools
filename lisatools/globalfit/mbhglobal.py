@@ -40,16 +40,17 @@ from eryn.utils.updates import Update
 
 class UpdateNewResidualsMBH(Update):
     def __init__(
-        self, comm, head_rank, verbose=False
+        self, comm, head_rank, last_prior_vals, verbose=False
     ):
         self.comm = comm
         self.head_rank = head_rank
         self.verbose = verbose
+        self.last_prior_vals = last_prior_vals
 
     def __call__(self, iter, last_sample, sampler):
         
         if self.verbose:
-            print("Sending psd update to head process.")
+            print("Sending mbh update to head process.")
  
         update_dict = {
             "cc_params": last_sample.branches["mbh"].coords[0].copy(),
@@ -74,9 +75,12 @@ class UpdateNewResidualsMBH(Update):
         
         assert np.all(new_info.mbh_info["cc_params"] == last_sample.branches["mbh"].coords[0])
         
-        generated_info = new_info.get_data_psd(n_gen_in=nwalkers_pe)
-    
+        generated_info = new_info.get_data_psd(n_gen_in=nwalkers_pe, return_prior_val=True, fix_val_in_gen=["mbh"])
+
         data, psd = generated_info["data"], generated_info["psd"]
+
+        old_data_fin = sampler.moves[0].data_residuals[:].copy()
+        old_psds_fin = sampler.moves[0].psd[:].copy()
 
         data_fin = xp.asarray([data[0], data[1], np.zeros_like(data[0])])
         psds_fin = xp.asarray([psd[0], psd[1], np.full_like(psd[0], 1e10)])
@@ -86,17 +90,37 @@ class UpdateNewResidualsMBH(Update):
         for i in range(data_fin.shape[1]):
             start_ll_check[i] = (-1/2 * 4 * new_info.general_info["df"] * xp.sum(data_fin[:2, i].conj() * data_fin[:2, i] / psds_fin[:2, i]) - xp.sum(xp.log(xp.asarray(psds_fin[:2, i])))).get().real
 
-        xp.get_default_memory_pool().free_all_blocks()
+        # accept or reject
+        # leave mbh val out of prior because it is same before and after
+        prev_logp = self.last_prior_vals.copy()
+        prev_logl = last_sample.log_like[0].copy()
 
-        last_sample.log_like[0] = start_ll_check[:]
+        # leave mbh val out of prior because it is same before and after
+        logp = generated_info["gb_prior_vals"] + generated_info["psd_prior_vals"]
+        logl = start_ll_check
+
+        # all in the cold chain (beta = 1)
+        prev_logP = prev_logl + prev_logp
+        logP = logl + logp
+
+        # factors = 0.0
+        accept = (logP - prev_logP) > np.log(sampler.get_model().random.rand(*logP.shape))
+        # TODO: this was not right in the end. Need to think about more. 
+        # so adding this:
+        accept[:] = True
+        
+        self.last_prior_vals[accept] = logp[accept]
+        xp.get_default_memory_pool().free_all_blocks()
+        
+        # log prior stays the same because it is for the MBHs specifically. 
+        last_sample.log_like[0, accept] = start_ll_check[accept]
 
         for move in sampler.moves:
-            move.data_residuals[:] = data_fin
-            move.psd[:] = psds_fin
+            move.data_residuals[:, accept] = data_fin[:, accept]
+            move.psd[:, accept] = psds_fin[:, accept]
 
-        
         if self.verbose:
-            print("Finished subbing in new data.")
+            print(f"Finished subbing in new data. Acceptance fraction: {accept.sum() / accept.shape[0]}")
 
         del data_fin, psds_fin
         xp.get_default_memory_pool().free_all_blocks()
@@ -130,7 +154,7 @@ def run_mbh_pe(gpu, comm, head_rank):
 
     assert np.all(mbh_info["cc_params"] == last_sample.branches["mbh"].coords[0])
 
-    generated_info = gf_information.get_data_psd(include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
+    generated_info = gf_information.get_data_psd(include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe, return_prior_val=True, fix_val_in_gen=["mbh"])
     fd = xp.asarray(gf_information.general_info["fd"])
     
     data_fin = xp.asarray([generated_info["data"][0], generated_info["data"][1], np.zeros_like(generated_info["data"][1])])
@@ -206,7 +230,10 @@ def run_mbh_pe(gpu, comm, head_rank):
 
     move = MBHSpecialMove(wave_gen, fd, data_fin, psds_fin, mbh_info["pe_info"]["num_prop_repeats"], transform_fn, priors, waveform_kwargs, inner_moves, df, temperature_controls)
 
-    update = UpdateNewResidualsMBH(comm, head_rank, verbose=False)
+    # exclude MBH prior val because it will be the same on both sides
+    # simplifies computation and storing information
+    last_prior_vals = generated_info["gb_prior_vals"] + generated_info["psd_prior_vals"]
+    update = UpdateNewResidualsMBH(comm, head_rank, last_prior_vals, verbose=True)
     print("MBH CHECK 2")
 
     ndims = {"mbh": mbh_info["pe_info"]["ndim"]}
@@ -247,8 +274,8 @@ def run_mbh_pe(gpu, comm, head_rank):
         moves=move,
         tempering_kwargs={"betas": betas, "permute": False},
         nbranches=len(branch_names),
-        nleaves_max={"mbh": mbh_info["pe_info"]["nleaves_max"]},
-        nleaves_min={"mbh": mbh_info["pe_info"]["nleaves_max"]},
+        nleaves_max={"mbh": start_state.branches["mbh"].shape[-2]},
+        nleaves_min={"mbh": start_state.branches["mbh"].shape[-2]},
         backend=backend,  # mbh_info["reader"],
         vectorize=True,
         periodic=periodic,  # TODO: add periodic to proposals

@@ -526,9 +526,17 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                         points_curr[gb_inds], psds=self.mgh.psd_shaped[0][0], walker_inds=group_temp_finder[1][gb_inds]
                     )
                 else:
-                    proposal_logpdf = self.rj_proposal_distribution["gb"].logpdf(
-                        points_curr[gb_inds]
-                    )
+                    tmp_points = points_curr[gb_inds]
+                    proposal_logpdf = xp.zeros(tmp_points.shape[0])
+
+                    batch_here = int(1e6)
+                    inds_splitting = np.arange(0, tmp_points.shape[0], batch_here)
+                    if inds_splitting[-1] != tmp_points.shape[0] - 1:
+                        inds_splitting = np.concatenate([inds_splitting, np.array([tmp_points.shape[0] - 1])])
+                    
+                    for stind, eind in zip(inds_splitting[:-1], inds_splitting[1:]):
+                        proposal_logpdf[stind: eind] = self.rj_proposal_distribution["gb"].logpdf(tmp_points[stind: eind])
+                    self.mempool.free_all_blocks()
 
             factors = (proposal_logpdf * -1) * (~gb_inds_orig).flatten() + (proposal_logpdf * +1) * (gb_inds_orig).flatten()
 
@@ -564,7 +572,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         # print(np.abs(new_state.log_like - ll_after).max())
         store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
         # print("CHECKING 0:", store_max_diff, self.is_rj_prop)
-        self.check_ll_inject(new_state)
+        self.check_ll_inject(new_state, verbose=True)
 
         per_walker_band_proposals = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
         per_walker_band_accepted = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
@@ -937,7 +945,8 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                 # print("CHECKING in:", tmp, store_max_diff)
                 if store_max_diff > 3e-4:
                     print("LARGER ERROR:", store_max_diff)
-                    self.check_ll_inject(new_state)
+                    breakpoint()
+                    self.check_ll_inject(new_state, verbose=True)
                     # self.mgh.get_ll(include_psd_info=True, stop=True)
 
         new_state.branches["gb"].coords[:] = gb_coords.get()
@@ -1464,11 +1473,11 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                         new_state.branches_inds["gb"]
                     ]
                 ),
-                psds=self.mgh.psd_shaped[0][0],
+                psds=self.mgh.lisasens_shaped[0][0],
                 walker_inds=group_temp_finder[1].get()[new_state.branches_inds["gb"]]
             )
 
-            new_state.log_prior = log_prior_new_per_bin.sum(axis=-1).get()
+            new_state.log_prior[:] = log_prior_new_per_bin.sum(axis=-1).get()
             
             ratios = (band_swaps_accepted / band_swaps_proposed).T #  self.swaps_accepted / self.swaps_proposed
             ratios[np.isnan(ratios)] = 0.0
@@ -1528,7 +1537,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                     breakpoint()
 
                 # reset data and fix likelihood
-                new_state.log_like[0] = self.check_ll_inject(new_state)
+                new_state.log_like[0] = self.check_ll_inject(new_state, verbose=True)
             
 
         self.time += 1
@@ -1548,7 +1557,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
             pass  # print(self.name, "2nd count check:", new_state.branches["gb"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
         return new_state, accepted
 
-    def check_ll_inject(self, new_state):
+    def check_ll_inject(self, new_state, verbose=False):
 
         check_ll = self.mgh.get_ll(include_psd_info=True).copy()
 
@@ -1589,7 +1598,8 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
 
         check_ll_new = self.mgh.get_ll(include_psd_info=True)
         check_ll_diff1 = check_ll_new - check_ll
-        # print(check_ll_diff1)
+        if verbose:
+            print(check_ll_diff1)
 
         # breakpoint()
         return check_ll_new

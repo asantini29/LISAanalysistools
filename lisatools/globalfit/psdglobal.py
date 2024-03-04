@@ -191,11 +191,12 @@ from eryn.utils.updates import Update
 
 class UpdateNewResidualsPSD(Update):
     def __init__(
-        self, comm, head_rank, verbose=False
+        self, comm, head_rank, last_mbh_prior_val, verbose=False
     ):
         self.comm = comm
         self.head_rank = head_rank
         self.verbose = verbose
+        self.last_mbh_prior_val = last_mbh_prior_val
 
     def __call__(self, iter, last_sample, sampler):
         
@@ -224,16 +225,27 @@ class UpdateNewResidualsPSD(Update):
             print("Received new data from head process.")
 
         nwalkers_pe = last_sample.log_like.shape[1]
-        generated_info = new_info.get_data_psd(n_gen_in=nwalkers_pe)
+        generated_info = new_info.get_data_psd(n_gen_in=nwalkers_pe, return_prior_val=True, include_lisasens=True, fix_val_in_gen=["psd"])
     
         data = generated_info["data"]
         psd = generated_info["psd"]
         
+        # copy old information to restore if needed
+        old_data_0 = sampler.log_like_fn.args[1][0][:].copy()
+        old_data_1 = sampler.log_like_fn.args[1][1][:].copy()
+
         sampler.log_like_fn.args[1][0][:] = xp.asarray(data[0])
         sampler.log_like_fn.args[1][1][:] = xp.asarray(data[1])
 
+        gb_params_old = sampler._priors["all_models_together"].gb_params.copy()
+        walker_inds_old = sampler._priors["all_models_together"].walker_inds.copy()
+        walker_inds_map_old = sampler._priors["all_models_together"].walker_inds_map.copy()
+        gb_inds_old = sampler._priors["all_models_together"].gb_inds.copy()
+
         if self.verbose:
             print("Finished subbing in new data.")
+
+        last_sample_copy = State(last_sample, copy=True)
 
         # need new prior
         gb_inds_generate = generated_info["gb_inds"]
@@ -243,15 +255,45 @@ class UpdateNewResidualsPSD(Update):
         sampler._priors["all_models_together"].walker_inds_map = gb_inds_generate
         sampler._priors["all_models_together"].gb_inds = new_info.gb_info["cc_inds"][gb_inds_generate] 
         
-        new_lp = sampler.compute_log_prior(last_sample.branches_coords, inds=last_sample.branches_inds, supps=last_sample.supplimental)
+        if "mbh_prior_vals" in generated_info:
+            new_mbh_prior_vals =  generated_info["mbh_prior_vals"].copy()
 
-        last_sample.log_prior[:] = new_lp[:]
+        else:
+            new_mbh_prior_vals = np.zeros(nwalkers_pe)
+        # add in mbh prior value (gb is already included)
+        new_lp_here = sampler.compute_log_prior(last_sample.branches_coords, inds=last_sample.branches_inds, supps=last_sample.supplimental)
+        logp = new_mbh_prior_vals + new_lp_here[0]
+        logl = sampler.compute_log_like(last_sample.branches_coords, inds=last_sample.branches_inds, supps=last_sample.supplimental, logp=new_lp_here)[0]
+        logP = logp + logl[0]  # ALWAYS COLD CHAIN SO beta = 1
+        
+        # add MBH prior val that does not affect the rest of the sampler
+        prev_logp = last_sample_copy.log_prior[0].copy() + self.last_mbh_prior_val
+        prev_logl = last_sample_copy.log_like[0].copy()
+        prev_logP = prev_logp + prev_logl  # ALWAYS COLD CHAIN SO beta = 1
+        
+        # factors = 0.0
+        accept = (logP - prev_logP) > np.log(sampler.get_model().random.rand(*logl[0].shape))
+        # TODO: this was not right in the end. Need to think about more. 
+        # so adding this:
+        accept[:] = True
 
-        new_ll = sampler.compute_log_like(last_sample.branches_coords, inds=last_sample.branches_inds, supps=last_sample.supplimental, logp=last_sample.log_prior)[0]
+        print(f"Acceptance fraction: {accept.sum() / accept.shape[0]}")
+        # was not stored before --> update 
+        last_sample.log_prior[:, accept] = new_lp_here[:, accept]
+        last_sample.log_like[:, accept] = logl[:, accept]
+        self.last_mbh_prior_val[accept] = new_mbh_prior_vals[accept]
 
+        # stored before --> reset
+        sampler.log_like_fn.args[1][0][~accept] = old_data_0[~accept]
+        sampler.log_like_fn.args[1][1][~accept] = old_data_1[~accept]
+
+        sampler._priors["all_models_together"].gb_params[~accept] = gb_params_old[~accept]
+        sampler._priors["all_models_together"].walker_inds[~accept] = walker_inds_old[~accept]
+        sampler._priors["all_models_together"].walker_inds_map[~accept] = walker_inds_map_old[~accept]
+        sampler._priors["all_models_together"].gb_inds[~accept] = gb_inds_old[~accept]
+        
         xp.get_default_memory_pool().free_all_blocks()
 
-        last_sample.log_like[:] = new_ll[:]
         return
 
 
@@ -269,7 +311,7 @@ def run_psd_pe(gpu, comm, head_rank):
 
     priors = {"all_models_together": psd_info["priors"]}
 
-    generated_info = gf_information.get_data_psd(include_ll=False, include_source_only_ll=False, n_gen_in=nwalkers_pe)
+    generated_info = gf_information.get_data_psd(include_ll=False, include_source_only_ll=False, n_gen_in=nwalkers_pe, return_prior_val=True, fix_val_in_gen=["psd"])
     
     if "gb_inds" in generated_info:
 
@@ -343,7 +385,8 @@ def run_psd_pe(gpu, comm, head_rank):
         betas=betas
     )
 
-    update = UpdateNewResidualsPSD(comm, head_rank, verbose=False)
+    mbh_priors_in = np.full(nwalkers_pe, np.inf)if "mbh_prior_vals" not in generated_info else generated_info["mbh_prior_vals"].copy()
+    update = UpdateNewResidualsPSD(comm, head_rank, mbh_priors_in, verbose=False)
 
     ndims_in = psd_info["pe_info"]["ndims"]
     nleaves_max_in = psd_info["pe_info"]["nleaves_max"]
