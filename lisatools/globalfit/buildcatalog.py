@@ -9,7 +9,7 @@ import pandas as pd
 import os
 
 from bbhx.utils.transform import LISA_to_SSB
-from .gathergalaxy import gather_gb_samples
+from .gathergalaxy import gather_gb_samples_cat
 
 
 def build_gb_catalog(current_info, gpu, **kwargs):
@@ -22,13 +22,24 @@ def build_gb_catalog(current_info, gpu, **kwargs):
 
     generated_info = current_info.get_data_psd(include_gbs=False, include_mbhs=False, include_lisasens=False, only_max_ll=True)  # , include_ll=True, include_source_only_ll=True)
     psd = xp.asarray(generated_info["psd"])
-    output_information = gather_gb_samples(current_info, gb_reader, psd, gpu, **kwargs)
+    output_information = gather_gb_samples_cat(current_info, gb_reader, psd, gpu, **kwargs)
     
-    unique_vals, first_entry_of_each_group, uni_inverse = np.unique(output_information[:,0].astype(int), return_index=True, return_inverse=True)
+    info_together = np.concatenate([output_information.groups[:, None], output_information.confidence[:, None], output_information.snr[:, None], output_information.params], axis=1)
+    
+    # keep only
+    info_together = info_together[output_information.confidence >= 0.25]
+    kept_groups = np.unique(output_information.groups[output_information.confidence >= 0.25])
+
+    median_inds_out = np.zeros(kept_groups.shape[0], dtype=int)
+    for i, group in enumerate(kept_groups):
+        params_group = output_information.get_group(group)
+        median_ind = np.argsort(params_group[:, 1])[int(len(params_group) / 2)]
+        tmp = np.where(info_together[:, 4] == params_group[median_ind, 1])[0][0]  # 4 should be frequency
+        median_inds_out[i] = tmp  # tmp is a reference ot order in info_together after removed groups for low confidence
 
     keys = [
         "Group ID",
-        "Evidence",
+        "Confidence",
         "SNR",
         "Amplitude",
         "Frequency",
@@ -40,7 +51,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
         "sinlat",
     ]
 
-    df = pd.DataFrame({key: item for key, item in zip(keys, output_information.T)})
+    df = pd.DataFrame({key: item for key, item in zip(keys, info_together.T)})
 
     df["Ecliptic Latitude"] = np.arcsin(df["sinlat"])
     df["Frequency"] = df["Frequency"] / 1e3
@@ -51,7 +62,8 @@ def build_gb_catalog(current_info, gpu, **kwargs):
     month_val = datetime.now().month
     day_val = datetime.now().day
     
-    df_main = df.iloc[first_entry_of_each_group]
+    df_main = df.iloc[median_inds_out]
+
     name_index = [f"EREBOR_GB_{year_val}_{month_val}_{day_val}_{i:08d}" for i in range(df_main.shape[0])]
     
     chain_file_index = 0
@@ -76,13 +88,13 @@ def build_gb_catalog(current_info, gpu, **kwargs):
     df_meta = pd.DataFrame({"Observation Time": [current_info.general_info["Tobs"]], "parent": [None], "Build Time": [datetime.now()]})
     df_meta.to_hdf(current_info.general_info["file_information"]["gb_main_chain_file"], "metadata", mode="a", complevel=9)
 
-    assert len(name_index) == len(first_entry_of_each_group)
+    assert len(name_index) == len(median_inds_out)
     # exit(0)
-    for i, (sub_df_name, index, store_file) in enumerate(zip(name_index, first_entry_of_each_group, chain_file_list)):
+    for i, (sub_df_name, index, store_file) in enumerate(zip(name_index, median_inds_out, chain_file_list)):
         sub_df = df[df["Group ID"].astype(int) == int(df.iloc[index]["Group ID"])]
         sub_df.to_hdf(dirname + store_file, sub_df_name + "_chain", mode="a", complevel=9)
         if (i + 1) % 100 == 0:
-            print(f"Sub hdf: {i + 1} of {len(first_entry_of_each_group)}")
+            print(f"Sub hdf: {i + 1} of {len(median_inds_out)}")
 
 def build_mbh_catalog(current_info, gpu, **kwargs):
     

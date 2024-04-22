@@ -234,20 +234,33 @@ class HDFBackend(eryn_HDFBackend):
         if slice_vals is None:
             slice_vals = slice(discard + thin - 1, self.iteration, thin)
 
-        # open the file wrapped in a "with" statement
-        with self.open() as f:
-            # get the group that everything is stored in
-            g = f[self.name]
-            iteration = g.attrs["iteration"]
-            if iteration <= 0:
-                raise AttributeError(
-                    "You must run the sampler with "
-                    "'store == True' before accessing the "
-                    "results"
-                )
+        successful = False
+        num_try = 0
 
-            v_all = {key: g["band_info"][key][slice_vals] for key in g["band_info"] if key != "band_edges"}
-            v_all["band_edges"] = g["band_info"]["band_edges"][:]
+        while not successful and num_try < 100:
+            try:
+                # open the file wrapped in a "with" statement
+                with self.open() as f:
+                    # get the group that everything is stored in
+                    g = f[self.name]
+                    iteration = g.attrs["iteration"]
+                    if iteration <= 0:
+                        raise AttributeError(
+                            "You must run the sampler with "
+                            "'store == True' before accessing the "
+                            "results"
+                        )
+
+                    v_all = {key: g["band_info"][key][slice_vals] for key in g["band_info"] if key != "band_edges"}
+                    v_all["band_edges"] = g["band_info"]["band_edges"][:]
+                    successful = True
+            except OSError:
+                num_try += 1
+                print(f"Tried to open h5 file {num_try} times.")
+                time.sleep(20.0)
+        if not successful:
+            raise OSError("Unable to open h5 file after many tries.")
+            
         return v_all
 
     def get_band_info(self, **kwargs):
