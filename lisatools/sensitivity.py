@@ -622,6 +622,7 @@ def SGal(fr, pars, use_gpu=False):
     sl1 = pars[2]
     kn = pars[3]
     sl2 = pars[4]
+
     Sgal = (
         Amp
         * xp.exp(-(fr ** alpha) * sl1)
@@ -705,9 +706,9 @@ def GalConf(fr, Tobs=None, foreground_params=None, use_gpu=False):
         tck1 = interpolate.splrep(Xobs, Slope1, s=0, k=1)
         tck2 = interpolate.splrep(Xobs, knee, s=0, k=1)
         tck3 = interpolate.splrep(Xobs, Slope2, s=0, k=1)
-        sl1 = interpolate.splev(Tobs, tck1, der=0)
-        kn = interpolate.splev(Tobs, tck2, der=0)
-        sl2 = interpolate.splev(Tobs, tck3, der=0)
+        sl1 = float(interpolate.splev(Tobs, tck1, der=0))
+        kn = float(interpolate.splev(Tobs, tck2, der=0))
+        sl2 = float(interpolate.splev(Tobs, tck3, der=0))
         # print "interpolated values: slope1, knee, slope2", sl1, kn, sl2
 
     elif foreground_params is not None:
