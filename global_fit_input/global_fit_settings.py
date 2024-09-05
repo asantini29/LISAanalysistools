@@ -19,6 +19,11 @@ from eryn.moves import StretchMove
 from lisatools.sampling.moves.skymodehop import SkyMove
 
 
+def dtrend(t, y):
+    m, b = np.polyfit(t, y, 1)
+    ytmp = y - (m * t + b)
+    ydetrend = ytmp - np.mean(ytmp)
+    return ydetrend
 
 # basic transform functions for pickling
 def f_ms_to_s(x):
@@ -40,7 +45,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "sixth_run_through"
+    base_file_name = "rework_1st_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -48,7 +53,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information["fp_psd_search"] = file_store_dir + base_file_name + "_search_psd.h5"
     file_information["fp_mbh_search_base"] = file_store_dir + base_file_name + "_search_mbh"
 
-
+    file_information["fp_main"] = file_store_dir + base_file_name + "_parameter_estimation_main.h5"
     file_information["fp_gb_pe"] = file_store_dir + base_file_name + "_parameter_estimation_gb.h5"
     file_information["fp_psd_pe"] = file_store_dir + base_file_name + "_parameter_estimation_psd.h5"
     file_information["fp_mbh_pe"] = file_store_dir + base_file_name + "_parameter_estimation_mbh.h5"
@@ -92,6 +97,11 @@ def get_global_fit_settings(copy_settings_file=False):
         tXYZ["Y"].squeeze(),
         tXYZ["Z"].squeeze(),
     )
+
+    X = dtrend(t, X.copy())
+    Y = dtrend(t, Y.copy())
+    Z = dtrend(t, Z.copy())
+
     dt = t[1] - t[0]
 
     Nobs = len(t)
@@ -122,7 +132,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [4, 5, 6, 7]
+    gpus = [2]
 
     all_general_info = dict(
         file_information=file_information,
@@ -155,37 +165,23 @@ def get_global_fit_settings(copy_settings_file=False):
     ###############################
     ###############################
 
-    head_rank = 0
+    head_rank = 1
 
-    gb_pe_rank = 1
-    gb_pe_gpu = gpus[0]
-
-    # should be one more rank than GPUs for refit
-    gb_search_rank = [2, 3]
-    gb_search_gpu = gpus[1:2]
-
-    psd_rank = 5
-    psd_gpu = gpus[2]
-
-    mbh_rank = 6
-    mbh_gpu = gpus[3]
+    main_rank = 0
+    main_gpu = gpus[0]
+    other_gpus = gpus[1:]
 
     # run results rank will be next available rank if used
     # gmm_ranks will be all other ranks
 
     rank_info = dict(
         head_rank=head_rank,
-        gb_pe_rank=gb_pe_rank,
-        gb_search_rank=gb_search_rank,
-        psd_rank=psd_rank,
-        mbh_rank=mbh_rank,
+        main_rank=main_rank
     )
 
     gpu_assignments = dict(
-        gb_pe_gpu=gb_pe_gpu,
-        gb_search_gpu=gb_search_gpu,
-        psd_gpu=psd_gpu,
-        mbh_gpu=mbh_gpu,
+        main_gpu=main_gpu,
+        other_gpus=other_gpus
     )
 
     ##################################
@@ -375,7 +371,7 @@ def get_global_fit_settings(copy_settings_file=False):
         3: uniform_dist(2.0e-15, 20.0e-15),  # Sa_a
     }
 
-    psd_kwargs = dict(sens_fn="noisepsd_AE", use_gpu=True)
+    psd_kwargs = dict(sens_fn="A1TDISens")  # , use_gpu=False)
     psd_initialize_kwargs = {}
 
     get_psd = GetPSDModel(
@@ -386,9 +382,9 @@ def get_global_fit_settings(copy_settings_file=False):
  
     priors_galfor = {
         0: uniform_dist(1e-45, 2e-43),  # amp
-        1: uniform_dist(0.01, 3.0),  # alpha
-        2: uniform_dist(1e0, 1e7),  # Slope1
-        3: uniform_dist(1e-4, 5e-2),  # knee
+        1: uniform_dist(1e-4, 5e-2),  # knee
+        2: uniform_dist(0.01, 3.0),  # alpha
+        3: uniform_dist(1e0, 1e7),  # Slope1
         4: uniform_dist(5e1, 8e3),  # Slope2
     }
 
