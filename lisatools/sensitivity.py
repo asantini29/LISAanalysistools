@@ -408,6 +408,92 @@ class T1TDISens(Sensitivity):
         return 0.0 * (Sh * t)
 
 
+#! add tdi 2
+class A2TDISens(Sensitivity):
+    channel: str = "A"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        __doc__ = (
+            "Transform from the base sensitivity functions to the A,E TDI PSDs.\n\n"
+            + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
+        )
+
+        x = 2.0 * np.pi * lisaLT * f
+        factor_tdi2 = 4 * np.sin(2 * x) ** 2
+        Sa = (
+            8.0
+            * np.sin(x) ** 2
+            * factor_tdi2
+            * (
+                2.0 * Spm * (3.0 + 2.0 * np.cos(x) + np.cos(2 * x))
+                + Sop * (2.0 + np.cos(x))
+            )
+        )
+
+        return Sa
+
+    @staticmethod
+    def stochastic_transform(
+        f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
+    ) -> float | np.ndarray:
+        __doc__ = (
+            "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
+            + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
+        )
+        x = 2.0 * np.pi * lisaLT * f
+        t = 4.0 * x**2 * np.sin(x) ** 2
+        factor_tdi2 = 4 * np.sin(2 * x) ** 2
+        return 1.5 * (Sh * t * factor_tdi2) 
+
+
+class E2TDISens(A2TDISens):
+    channel: str = "E"
+    __doc__ = A2TDISens.__doc__
+    pass
+
+
+class T2TDISens(Sensitivity):
+    channel: str = "T"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        __doc__ = (
+            "Transform from the base sensitivity functions to the T TDI PSDs.\n\n"
+            + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
+        )
+
+        x = 2.0 * np.pi * lisaLT * f
+        factor_tdi2 = 4 * np.sin(2 * x) ** 2
+
+        return (
+            16.0 * Sop * (1.0 - np.cos(x)) * np.sin(x) ** 2
+            + 128.0 * Spm * np.sin(x) ** 2 * np.sin(0.5 * x) ** 4
+        ) * factor_tdi2
+
+    @staticmethod
+    def stochastic_transform(
+        f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
+    ) -> float | np.ndarray:
+        __doc__ = (
+            "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
+            + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
+        )
+        x = 2.0 * np.pi * lisaLT * f
+        t = 4.0 * x**2 * np.sin(x) ** 2
+        factor_tdi2 = 4 * np.sin(2 * x) ** 2
+        return 0.0 * (Sh * t * factor_tdi2)
+
 class LISASens(Sensitivity):
     @classmethod
     def get_Sn(
@@ -781,6 +867,35 @@ class AE1SensitivityMatrix(SensitivityMatrix):
 
     def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
         sens_mat = [A1TDISens, E1TDISens]
+        super().__init__(f, sens_mat, **sens_kwargs)
+
+class AET2SensitivityMatrix(SensitivityMatrix):
+    """Default sensitivity matrix for AET (TDI 2)
+
+    This is just an array because no cross-terms.
+
+    Args:
+        f: Frequency array.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
+
+    """
+
+    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+        sens_mat = [A2TDISens, E2TDISens, T2TDISens]
+        super().__init__(f, sens_mat, **sens_kwargs)
+
+
+class AE2SensitivityMatrix(SensitivityMatrix):
+    """Default sensitivity matrix for AE (no T) (TDI 2)
+
+    Args:
+        f: Frequency array.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
+
+    """
+
+    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+        sens_mat = [A2TDISens, E2TDISens]
         super().__init__(f, sens_mat, **sens_kwargs)
 
 
