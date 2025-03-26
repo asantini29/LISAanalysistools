@@ -27,7 +27,7 @@ def inner_product(
     dt: Optional[float] = None,
     df: Optional[float] = None,
     f_arr: Optional[float] = None,
-    psd: Optional[str | None | np.ndarray | SensitivityMatrix] = "LISASens",
+    psd: Optional[str | None | list | np.ndarray | SensitivityMatrix] = "LISASens",
     psd_args: Optional[tuple] = (),
     psd_kwargs: Optional[dict] = {},
     normalize: Optional[bool | str] = False,
@@ -60,10 +60,10 @@ def inner_product(
         df: Constant frequency spacing. This will assume a frequency domain signal with constant frequency spacing.
         f_arr: Array of specific frequencies at which the signal is given.
         psd: Indicator of what psd to use. If a ``str``, this will be passed as the ``sens_fn`` kwarg to :func:`get_sensitivity`.
-            If ``None``, it will be an array of ones. Or, you can pass a 1D ``np.ndarray`` of psd values that must be the same length
+            If ``None``, it will be an array of ones. If a ``list``, it will be passed to a ``SensitivityMatrix``. Or, you can pass a 1D ``np.ndarray`` of psd values that must be the same length
             as the frequency domain signals.
-        psd_args: Arguments to pass to the psd function if ``type(psd) == str``.
-        psd_kwargs: Keyword arguments to pass to the psd function if ``type(psd) == str``.
+        psd_args: Arguments to pass to the psd function if ``type(psd) == str | list``.
+        psd_kwargs: Keyword arguments to pass to the psd function if ``type(psd) == str | list``.
         normalize: Normalize the inner product. If ``True``, it will normalize the square root of the product of individual signal inner products.
             You can also pass ``"sig1"`` or ``"sig2"`` to normalize with respect to one signal.
         complex: If ``True``, return the complex value of the inner product rather than just its real-valued part.
@@ -99,7 +99,10 @@ def inner_product(
 
     # get psd weighting
     if not isinstance(psd, SensitivityMatrix):
-        psd = SensitivityMatrix(freqs, [psd], *psd_args, **psd_kwargs)
+        if isinstance(psd, list):
+            psd = SensitivityMatrix(freqs, psd, *psd_args, **psd_kwargs)    
+        else:
+            psd = SensitivityMatrix(freqs, [psd], *psd_args, **psd_kwargs)
 
     operational_sets = []
 
