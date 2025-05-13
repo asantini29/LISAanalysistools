@@ -2,10 +2,10 @@ import numpy as np
 from copy import deepcopy
 import warnings
 
-from lisatools.sensitivity import get_sensitivity
-from lisatools.globalfit.hdfbackend import HDFBackend as GBHDFBackend
-from lisatools.detector import sangria
+from ..sensitivity import get_sensitivity
+from ..detector import sangria
 from bbhx.waveformbuild import BBHWaveformFD
+from ..sources.emri.waveform import EMRITDIWaveform
 
 from gbgpu.gbgpu import GBGPU
 
@@ -172,6 +172,83 @@ class GetMBHTemplates:
             return_tuple += (None,)
         return return_tuple
 
+
+
+class GetEMRITemplates:
+
+    def __init__(self, initialization_kwargs, runtime_kwargs):
+        self.initialization_kwargs = initialization_kwargs
+        self.runtime_kwargs = runtime_kwargs
+
+    def __call__(self, current_state, emri_info, general_info, only_max_ll=False, n_gen_in=None, return_prior_val=False):
+
+        if "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]:
+            xp = cp
+            use_gpu = True
+        else:
+            xp = np
+            use_gpu = False
+
+        emri_gen = EMRITDIWaveform(**self.initialization_kwargs)
+
+        num_emri = current_state.branches["emri"].shape[2]  # index 2 is leaf count
+        num_freqs = len(general_info["fd"])
+    
+        if only_max_ll:
+            best = current_state.log_like[0].argmax()
+            emri_params = current_state.branches["emri"].coords[0, best:best + 1].copy()
+
+        else:
+            num_emri_walkers = current_state.log_like.shape[-1]
+            
+            inds = np.arange(num_emri_walkers)
+
+            # adjust if looking for less
+            if n_gen_in is not None and isinstance(n_gen_in, int):
+                if num_emri_walkers > n_gen_in:
+                    inds = np.random.choice(np.arange(num_emri_walkers), n_gen_in, replace=False)
+                
+            emri_params = current_state.branches["emri"].coords[0, inds].copy()
+
+        freqs = xp.asarray(general_info["fd"])
+
+        # TODO: adjust for AET/XYZ rather than AE
+        out = np.zeros((emri_params.shape[0], 2, general_info["fd"].shape[0]), dtype=complex)
+
+        for i in range(emri_params.shape[0]):
+            for leaf in range(emri_params.shape[1]):
+                emri_params_in = emri_info["transform"].both_transforms(emri_params[i, leaf:leaf + 1].reshape(-1, emri_info["pe_info"]["ndim"]))
+            
+                for emri_params_in_i in emri_params_in: 
+                    AET_t = emri_gen(*emri_params_in_i, **self.runtime_kwargs)
+                    breakpoint()
+                    tmp1 = xp.fft.rfft(AET_t, axis=-1)
+                    assert tmp1.shape[0] == freqs.shape[0]
+
+                    if use_gpu:
+                        tmp2 = tmp1.get()
+                    else:
+                        tmp2 = tmp1
+
+                    out[i] += tmp2
+
+        del emri_gen, freqs, AET, tmp2
+
+        if use_gpu:
+            xp.get_default_memory_pool().free_all_blocks()
+        
+        return_tuple = (out[:, 0], out[:, 1])
+        # TODO: delete GPU data if needed?
+
+        if return_prior_val:
+            prior_val = emri_info["priors"]["emri"].logpdf(emri_params.reshape(-1, emri_params.shape[-1])).reshape(emri_params.shape[:-1]).sum(axis=-1)
+            return_tuple += (prior_val,)
+        else:
+            return_tuple += (None,)
+        return return_tuple
+
+# TODO: generalize this setup to adjustable model inputs
+
 class GetGBTemplates:
 
     def __init__(self, initialization_kwargs, runtime_kwargs):
@@ -268,25 +345,25 @@ class GenerateCurrentState:
         info_dict = {}
         n_gen_check_it = []
         if include_mbhs:
-            A_mbh, E_mbh, prior_vals = general_info["mbh"]["get_templates"](current_state, general_info["mbh"], general_info["general"], only_max_ll=only_max_ll, n_gen_in=n_gen_in, return_prior_val=return_prior_val)
+            A_mbh, E_mbh, prior_vals = general_info["source_info"]["mbh"]["get_templates"](current_state, general_info["source_info"]["mbh"], general_info["general"], only_max_ll=only_max_ll, n_gen_in=n_gen_in, return_prior_val=return_prior_val)
             n_mbh = A_mbh.shape[0]
             info_dict["mbh"] = {"n": n_mbh, "A": A_mbh, "E": E_mbh, "prior": prior_vals}
             n_gen_check_it.append(n_mbh)
 
         if include_gbs:
-            A_gb, E_gb = general_info["gb"]["get_templates"](current_state, general_info["gb"], general_info["general"], only_max_ll=only_max_ll, return_prior_val=True)
+            A_gb, E_gb = general_info["source_info"]["gb"]["get_templates"](current_state, general_info["source_info"]["gb"], general_info["general"], only_max_ll=only_max_ll, return_prior_val=True)
             n_gb = A_gb.shape[0]
             info_dict["gb"] = {"n": n_gb, "A": A_gb, "E": E_gb, "prior": None}
             n_gen_check_it.append(n_gb)
 
         if include_psd:
-            A_psd, E_psd, psd_prior_val = general_info["psd"]["get_psd"](current_state, general_info["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=False, return_prior_val=return_prior_val)
+            A_psd, E_psd, psd_prior_val = general_info["source_info"]["psd"]["get_psd"](current_state, general_info["source_info"]["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=False, return_prior_val=return_prior_val)
             n_psd = A_psd.shape[0]
             info_dict["psd"] = {"n": n_psd, "A": A_psd, "E": E_psd, "prior": psd_prior_val}
             n_gen_check_it.append(n_psd)
 
         if include_lisasens:
-            A_lisasens, E_lisasens, _ = general_info["psd"]["get_psd"](current_state, general_info["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=True, return_prior_val=False)
+            A_lisasens, E_lisasens, _ = general_info["source_info"]["psd"]["get_psd"](current_state, general_info["source_info"]["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=True, return_prior_val=False)
             n_lisasens = A_lisasens.shape[0]
             info_dict["lisasens"] = {"n": n_lisasens, "A": A_lisasens, "E": E_lisasens, "prior": None}
             n_gen_check_it.append(n_lisasens)
@@ -393,7 +470,7 @@ class GenerateCurrentState:
             # calculate prior
             if return_prior_val:
                 if "lisasens" in info_dict and "A" in info_dict["lisasens"] and info_dict["lisasens"]["A"] is not None and "walker_inds" in info_dict["gb"]:
-                    info_dict["gb"]["prior"] = general_info["gb"]["get_templates"].get_gb_prior(general_info["gb"], info_dict["lisasens"]["A"], info_dict["gb"]["walker_inds"])
+                    info_dict["gb"]["prior"] = general_info["source_info"]["gb"]["get_templates"].get_gb_prior(general_info["gb"], info_dict["lisasens"]["A"], info_dict["gb"]["walker_inds"])
 
         if only_max_ll:
             data_A = data_A.squeeze()

@@ -17,7 +17,7 @@ except (ModuleNotFoundError, ImportError):
     pass
 
 from . import detector as lisa_models
-from .utils.utility import AET
+from .utils.utility import AET, get_array_module
 from .utils.constants import *
 from .stochastic import (
     StochasticContribution,
@@ -171,12 +171,13 @@ class Sensitivity(ABC):
         sgal = xp.zeros_like(f)
 
         if (
-            (stochastic_params != () and stochastic_params is not None)
+            (tuple(stochastic_params) != tuple() and stochastic_params is not None)
             or (stochastic_kwargs != {} and stochastic_kwargs is not None)
             or stochastic_function is not None
         ):
             if stochastic_function is None:
                 stochastic_function = FittedHyperbolicTangentGalacticForeground
+                assert len(stochastic_params) == 1
             
             stochastic_function = check_stochastic(stochastic_function)
 
@@ -565,12 +566,17 @@ class SensitivityMatrix:
             | Sensitivity
         ),
         *sens_args: tuple,
+        sens_kwargs_mat = None,
         **sens_kwargs: dict,
     ) -> None:
         self.frequency_arr = f
         self.data_length = len(self.frequency_arr)
         self.sens_args = sens_args
-        self.sens_kwargs = sens_kwargs
+        if sens_kwargs_mat is None:
+            self.sens_kwargs = sens_kwargs
+        else:
+            self.sens_kwargs = sens_kwargs_mat
+
         self.sens_mat = sens_mat
 
     @property
@@ -583,6 +589,10 @@ class SensitivityMatrix:
         assert frequency_arr.ndim == 1
         self._frequency_arr = frequency_arr
 
+    def check_update(self):
+        if not self.can_redo:
+            raise ValueError("Cannot update sensitivities because original input was arrays rather than functions.")
+
     def update_frequency_arr(self, frequency_arr: np.ndarray) -> None:
         """Update class with new frequency array.
 
@@ -590,17 +600,20 @@ class SensitivityMatrix:
             frequency_arr: Frequency array.
 
         """
+        self.check_update()
         self.frequency_arr = frequency_arr
         self.sens_mat = self.sens_mat_input
 
-    def update_model(self, model: lisa_models.LISAModel) -> None:
+    def update_model(self, model: lisa_models.LISAModel | list | np.ndarray) -> None:
         """Update class with new sensitivity model.
 
         Args:
             model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.
 
         """
-        self.sens_kwargs["model"] = model
+        self.check_update()
+        for tmp_kwargs in self.sens_kwargs.flatten():
+            tmp_kwargs["model"] = model
         self.sens_mat = self.sens_mat_input
 
     def update_stochastic(self, **kwargs: dict) -> None:
@@ -613,7 +626,11 @@ class SensitivityMatrix:
                 that is not updated will remain in place.
 
         """
-        self.sens_kwargs = {**self.sens_kwargs, **kwargs}
+        self.check_update()
+        tmptmp = self.sens_kwargs.flatten()
+        for i, tmp_kwargs in tmptmp:
+            tmptmp[i] = {**tmp_kwargs, **kwargs}
+        self.sens_kwargs = tmptmp.reshape(self.sens_kwargs.shape)
         self.sens_mat = self.sens_mat_input
 
     @property
@@ -632,37 +649,77 @@ class SensitivityMatrix:
         ),
     ) -> None:
         """Set sensitivity matrix."""
-        self.sens_mat_input = deepcopy(sens_mat)
-        self._sens_mat = np.asarray(sens_mat, dtype=object)
-
-        # not an
-        new_out = np.full(len(self._sens_mat.flatten()), None, dtype=object)
-        self.return_shape = self._sens_mat.shape
-        for i in range(len(self._sens_mat.flatten())):
-            current_sens = self._sens_mat.flatten()[i]
-            if hasattr(current_sens, "get_Sn") or isinstance(current_sens, str):
-                new_out[i] = get_sensitivity(
-                    self.frequency_arr,
-                    *self.sens_args,
-                    sens_fn=current_sens,
-                    **self.sens_kwargs,
-                )
-
-            elif isinstance(current_sens, np.ndarray) or isinstance(
-                current_sens, cp.ndarray
-            ):
-                new_out[i] = current_sens
+        
+        
+        if isinstance(sens_mat, np.ndarray) or isinstance(
+            sens_mat, cp.ndarray
+        ):
+            self._sens_mat = sens_mat
+            if not hasattr(self, "sens_mat_input"):
+                self.can_redo = False
             else:
-                raise ValueError
+                self.can_redo = True
+        else:
+            self.sens_mat_input = deepcopy(sens_mat)
+            self._sens_mat = np.asarray(sens_mat, dtype=object)
+            if isinstance(self.sens_kwargs, np.ndarray) or isinstance(self.sens_kwargs, list):
+                tmp_kwargs = np.asarray(self.sens_kwargs, dtype=object)
+                assert tmp_kwargs.shape == self._sens_mat.shape
 
-        # setup in array form
-        self._sens_mat = np.asarray(list(new_out), dtype=float).reshape(
-            self.return_shape + (-1,)
-        )
+            elif isinstance(self.sens_kwargs, dict):
+                tmp_kwargs = np.full_like(self._sens_mat, self.sens_kwargs, dtype=object)
+            else:
+                raise ValueError("sens_kwargs Must be numpy object array, list, or dict.")
+            
+            # TODO: sens_kwargs property setup
+            self.sens_kwargs = tmp_kwargs
+            self.can_redo = True
+            # not an
+            new_out = np.full(len(self._sens_mat.flatten()), None, dtype=object)
+            self.return_shape = self._sens_mat.shape
+            for i in range(len(self._sens_mat.flatten())):
+                current_sens = self._sens_mat.flatten()[i]
+                if hasattr(current_sens, "get_Sn") or isinstance(current_sens, str):
+                    new_out[i] = get_sensitivity(
+                        self.frequency_arr,
+                        *self.sens_args,
+                        sens_fn=current_sens,
+                        **self.sens_kwargs.flatten()[i],
+                    )
+
+                else:
+                    raise ValueError
+
+            # setup in array form
+            self._sens_mat = np.asarray(list(new_out), dtype=float).reshape(
+                self.return_shape + (-1,)
+            )
+            
+        self._setup_det_and_inv()
+
+    def _setup_det_and_inv(self):
+        # setup detC
+        """Determinant of TDI matrix."""
+        if self.sens_mat.ndim < 3:
+            self.detC = self.sens_mat
+            self.invC = 1/self.sens_mat
+
+        else:
+            xp = get_array_module(self.sens_mat)
+            self.detC = xp.linalg.det(self.sens_mat.transpose(2, 0, 1))
+            invC = xp.zeros_like(self.sens_mat.transpose(2, 0, 1))
+            invC[self.detC != 0.0] = xp.linalg.inv(self.sens_mat.transpose(2, 0, 1)[self.detC != 0.0])
+            self.invC = invC.transpose(1, 2, 0)
+            self.invC[self.detC == 0.0] = 1e-100
 
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
         return self.sens_mat[index]
+
+    def __setitem__(self, index: Any, value: np.ndarray) -> np.ndarray:
+        """Indexing the class indexes the array."""
+        self.sens_mat[index] = value
+        self._setup_det_and_inv()
 
     @property
     def ndim(self) -> int:
@@ -818,8 +875,9 @@ class LISASensSensitivityMatrix(SensitivityMatrix):
 def get_sensitivity(
     f: float | np.ndarray,
     *args: tuple,
-    sens_fn: Optional[Sensitivity | str] = LISASens,
-    return_type="PSD",
+    sens_fn: Sensitivity | str = LISASens,
+    return_type: str="PSD",
+    fill_nans: float =1e10,
     **kwargs,
 ) -> float | np.ndarray:
     """Generic sensitivity generator
@@ -832,6 +890,8 @@ def get_sensitivity(
         sens_fn: String or class that represents the name of the desired PSD function.
         return_type: Described the desired output. Choices are ASD,
             PSD, or char_strain (characteristic strain). Default is ASD.
+        fill_nans: Value to fill nans in sensitivity (at 0 frequency). 
+            If ``None``, thens nans will be left in the array.
         **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.
 
     Return:
@@ -851,6 +911,10 @@ def get_sensitivity(
         )
 
     PSD = sensitivity.get_Sn(f, *args, **kwargs)
+
+    if fill_nans is not None:
+        assert isinstance(fill_nans, float)
+        PSD[np.isnan(PSD)] = fill_nans
 
     if return_type == "PSD":
         return PSD

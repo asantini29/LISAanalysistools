@@ -11,6 +11,8 @@ import numpy as np
 from scipy import interpolate
 import matplotlib.pyplot as plt
 
+from eryn.utils import TransformContainer
+
 
 try:
     import cupy as cp
@@ -279,6 +281,8 @@ class AnalysisContainer:
                 self.data_res_arr, self.sens_mat, **kwargs
             )
 
+    # TODO: make sure there is a way for backends to check TDI channel structure/domain is equivalent
+
     def _calculate_signal_operation(
         self,
         calc: str,
@@ -286,6 +290,8 @@ class AnalysisContainer:
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
+        transform_fn: Optional[TransformContainer] = None,
+        signal_gen: Optional[callable] = None,
         **kwargs: dict,
     ) -> float | complex:
         """Return the likelihood of a generated signal with the data.
@@ -298,6 +304,9 @@ class AnalysisContainer:
             data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
                 This can be used if any transforms are desired prior to the Likelihood computation. If it is not input,
                 the kwargs are taken to be the same as those used to initalize ``self.data_res_arr``.
+            transform_fn: Transform information for signal parameters if they 
+                are entered on a basis other than the waveform basis.
+            signal_gen: In scope waveform generator. Replaces ``self.signal_gen`` if this input is not ``None``. 
             **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
 
         Returns:
@@ -308,8 +317,16 @@ class AnalysisContainer:
         if data_res_arr_kwargs == {}:
             data_res_arr_kwargs = self.data_res_arr.init_kwargs
 
+        if transform_fn is not None:
+            args_tmp = np.asarray(args)
+            args_in = tuple(transform_fn.both_transforms(args_tmp))
+        else:
+            args_in = args
+
+        signal_gen_here = self.signal_gen if signal_gen is None else signal_gen
+
         template = DataResidualArray(
-            self.signal_gen(*args, **waveform_kwargs), **data_res_arr_kwargs
+            signal_gen_here(*args_in, **waveform_kwargs), **data_res_arr_kwargs
         )
 
         args_2 = (template,)
@@ -426,7 +443,30 @@ class AnalysisContainer:
             **kwargs,
         )
 
-    def eryn_likelihood_function(self, x, *args, **kwargs):
+    def eryn_likelihood_function(
+        self, x: np.ndarray | list | tuple, *args: Any, **kwargs: Any
+    ) -> np.ndarray | float:
+        """Likelihood function for Eryn sampler.
+
+        This function is not vectorized.
+
+        ``signal_gen`` must be set to use this function.
+
+        Args:
+            x: Parameters. Can be 1D list, tuple, array or 2D array.
+                If a 2D array is input, the computation is done serially.
+            *args: Likelihood args.
+            **kwargs: Likelihood kwargs.
+
+        Returns:
+            Likelihood value(s).
+
+        """
+        assert self.signal_gen is not None
+
+        if isinstance(x, list) or isinstance(x, tuple):
+            x = np.asarray(x)
+
         if x.ndim == 1:
             input_vals = tuple(x) + tuple(args)
             return self.calculate_signal_likelihood(*input_vals, **kwargs)
@@ -440,3 +480,193 @@ class AnalysisContainer:
 
         else:
             raise ValueError("x must be a 1D or 2D array.")
+
+
+class AnalysisContainerArray:
+    def __init__(self, analysis_containers, gpus=None):
+        if isinstance(analysis_containers, AnalysisContainer):
+            acs = np.array([analysis_containers], dtype=object)
+        elif isinstance(analysis_containers, np.ndarray):
+            assert analysis_containers.dtype == object
+            assert np.all([isinstance(tmp, AnalysisContainer) for tmp in analysis_containers.flatten()])
+            acs = analysis_containers
+        elif isinstance(analysis_containers, list):
+            if isinstance(analysis_containers[0], list):
+                raise ValueError("If inputing list of containers, must be 1D. Use a numpy object array for 2+D.")
+            acs = np.asarray(analysis_containers, dtype=object)
+        else:
+            raise ValueError("Analysis container must be single container, 1D list, or numpy object array.")
+        
+        self.acs = acs
+        self.acs_shape = acs.shape
+        self.acs_total_entries = np.prod(acs.shape)
+        try:
+            self.nchannels, self.data_length = acs.flatten()[0].data_res_arr.shape
+        except ValueError:
+            self.data_length = acs.flatten()[0].data_res_arr.shape[0]
+            self.nchannels = 1
+
+        if gpus is not None:
+            self.xp = xp = cp
+            if isinstance(gpus, list):
+                if len(gpus) > 1:
+                    raise NotImplementedError
+                xp.cuda.runtime.setDevice(gpus[0])
+            elif isinstance(gpus, int):
+                xp.cuda.runtime.setDevice(gpus)
+        else:
+            xp = np
+        # xp = get_array_module(acs.flatten()[0].data_res_arr[0])
+
+        ac_tmp = acs.flatten()[0]
+        self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[:-1]
+
+        assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
+        # reset so that all data are linear in memory
+        num_machines = 1 if gpus is None else len(gpus)
+
+        split_num = int(np.ceil(self.acs_total_entries / num_machines))
+        split_inds = np.arange(split_num, self.acs_total_entries, split_num)
+
+        self.gpu_splits = gpu_splits = np.split(np.arange(self.acs_total_entries), split_inds)
+
+        self.gpu_map = np.zeros(self.acs_total_entries, dtype=int)
+        self.split_map = np.zeros(self.acs_total_entries, dtype=int)
+        self.linear_data_arr = []
+        self.linear_psd_arr = []
+        for i, split in enumerate(gpu_splits):
+            self.gpu_map[split] = gpus[i]
+            self.split_map[split] = i
+            self.linear_data_arr.append(xp.zeros(self.data_length * self.nchannels * len(split), dtype=complex))
+            self.linear_psd_arr.append(xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=float))
+
+        self.num_acs = num_acs = len(acs.flatten())
+        self.gpus = gpus 
+        self.reset_linear_data_arr()
+        self.reset_linear_psd_arr()
+
+    def reset_linear_data_arr(self):
+        if self.gpus is not None:
+            main_gpu = self.xp.cuda.runtime.getDevice()
+
+        for i, ac in enumerate(self.acs.flatten()):
+            gpu = self.gpu_map[i]
+            split = self.split_map[i]
+            if self.gpus is not None:
+                self.xp.cuda.runtime.setDevice(gpu)
+
+            # following assumes everything is ordered purposefully
+            intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
+            start_index = intra_split_index * (self.nchannels * self.data_length)
+            end_index = (intra_split_index + 1) * (self.nchannels * self.data_length)
+            self.linear_data_arr[split][start_index:end_index] = self.xp.asarray(ac.data_res_arr.flatten())
+            ac.data_res_arr._data_res_arr = self.linear_data_arr[split][start_index:end_index].reshape(self.nchannels, self.data_length)
+            # TODO: add check to make sure changes are made inline along with protections
+            if self.gpus is not None:
+                self.xp.get_default_memory_pool().free_all_blocks()
+
+        if self.gpus is not None:
+            self.xp.cuda.runtime.setDevice(main_gpu)
+
+    def reset_linear_psd_arr(self):
+        if self.gpus is not None:
+            main_gpu = self.xp.cuda.runtime.getDevice()
+
+        for i, ac in enumerate(self.acs.flatten()):
+            gpu = self.gpu_map[i]
+            split = self.split_map[i]
+            if self.gpus is not None:
+                self.xp.cuda.runtime.setDevice(gpu)
+
+            # TODO: should I not store this in memory?!?!?
+            intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
+            start_index = intra_split_index * (np.prod(self.shape_sens) * self.data_length)
+            end_index = (intra_split_index + 1) * (np.prod(self.shape_sens) * self.data_length)
+            self.linear_psd_arr[split][start_index:end_index] = self.xp.asarray(ac.sens_mat.invC.flatten())
+            ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(self.shape_sens + (self.data_length,))
+
+            # TODO: add check to make sure changes are made inline along with protections
+            if self.gpus is not None:
+                self.xp.get_default_memory_pool().free_all_blocks()
+
+        if self.gpus is not None:
+            self.xp.cuda.runtime.setDevice(main_gpu)
+
+    @property
+    def f_arr(self):
+        return self.acs[0].data_res_arr.f_arr
+        
+    @property
+    def df(self):
+        return self.f_arr[1] - self.f_arr[0]
+
+    def __len__(self) -> int:
+        return len(self.acs)
+        
+    def _loop_operation(self, operation: str, **kwargs: Any) -> np.ndarray:
+        output = np.zeros(self.acs_total_entries)
+        for i, ac in enumerate(self.acs.flatten()):
+            output[i] = getattr(ac, operation)(**kwargs)
+        return output.reshape(self.acs_shape)
+
+    def inner_product(self, **kwargs):
+        return self._loop_operation("inner_product", **kwargs)
+
+    def likelihood(self, **kwargs):
+        return self._loop_operation("likelihood", **kwargs)
+
+    def snr(self, **kwargs):
+        return self._loop_operation("snr", **kwargs)
+
+    def __getitem__(self, index: Any) -> np.ndarray[AnalysisContainer]:
+        return self.acs[index]
+
+    def signal_operation(self, sign, templates, data_index=None, start_index=None):
+
+        assert isinstance(templates, np.ndarray) or isinstance(templates, cp.ndarray)
+        
+        if templates.ndim == 2:
+            _nchannels, template_length = templates.shape
+            num_templates = 1
+        elif templates.ndim == 3:
+            num_templates, _nchannels, template_length = templates.shape
+
+        if data_index is None:
+            assert num_templates == self.acs_total_entries
+            data_index = np.arange(num_templates)
+        else: 
+            assert data_index.max() < self.acs_total_entries
+
+        if start_index is None:
+            start_index = np.zeros_like(data_index)
+        else:
+            assert len(start_index) == num_templates
+            assert start_index < self.data_length
+
+        assert len(start_index) == len(data_index)
+        for i, (di, si) in enumerate(zip(data_index, start_index)):
+            self.acs[di].data_res_arr[:, si:si+template_length] += sign * templates[i]
+        
+    def add_signal_to_residual(self, *args, **kwargs):
+        self.signal_operation(-1, *args, **kwargs)
+
+    def remove_signal_from_residual(self, *args, **kwargs):
+        self.signal_operation(+1, *args, **kwargs)
+
+    @property
+    def data_shaped(self):
+        out = []
+        for i, tmp in enumerate(self.linear_data_arr):
+            if self.gpus is not None:
+                self.xp.cuda.runtime.setDevice(self.gpus[i])
+            out.append(tmp.reshape(-1, self.nchannels, self.data_length)) 
+        return out
+        
+    @property
+    def psd_shaped(self):
+        out = []
+        for i, tmp in enumerate(self.linear_psd_arr):
+            if self.gpus is not None:
+                self.xp.cuda.runtime.setDevice(self.gpus[i])
+            out.append(tmp.reshape(-1, self.nchannels, self.data_length)) 
+        return out
